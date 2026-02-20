@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Settings — Video Downloader</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+    }
+
+    /* === HEADER === */
+    .header {
+      background: linear-gradient(135deg, #16213e 0%, #0f3460 100%);
+      padding: 24px 32px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .header .logo { font-size: 28px; }
+    .header h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: white;
+      letter-spacing: 0.3px;
+    }
+    .header-right {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .version-badge {
+      padding: 5px 12px;
+      background: rgba(83, 132, 252, 0.12);
+      color: #7cacff;
+      border: 1px solid rgba(83, 132, 252, 0.2);
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+
+    /* === CONTAINER === */
+    .container {
+      max-width: 680px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    /* === SECTION === */
+    .section {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 12px;
+      margin-bottom: 16px;
+      overflow: hidden;
+    }
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 16px 20px 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+    .section-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      flex-shrink: 0;
+    }
+    .section-icon.blue { background: rgba(83, 132, 252, 0.12); }
+    .section-icon.green { background: rgba(67, 160, 71, 0.12); }
+    .section-icon.purple { background: rgba(156, 39, 176, 0.12); }
+    .section-icon.orange { background: rgba(251, 140, 0, 0.12); }
+    .section-icon.red { background: rgba(229, 57, 53, 0.12); }
+    .section-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #e8eaed;
+    }
+    .section-subtitle {
+      font-size: 11px;
+      color: #9aa0a6;
+      margin-top: 2px;
+    }
+    .section-body {
+      padding: 16px 20px 20px;
+    }
+
+    /* === SETTING ROW === */
+    .setting-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+      gap: 16px;
+    }
+    .setting-row:last-child { border-bottom: none; }
+    .setting-label {
+      flex: 1;
+      min-width: 0;
+    }
+    .setting-label-text {
+      font-size: 13px;
+      font-weight: 500;
+      color: #e0e0e0;
+    }
+    .setting-label-desc {
+      font-size: 11px;
+      color: #757575;
+      margin-top: 3px;
+      line-height: 1.4;
+    }
+    .setting-control {
+      flex-shrink: 0;
+    }
+
+    /* === SELECT === */
+    .setting-select {
+      appearance: none;
+      -webkit-appearance: none;
+      min-width: 170px;
+      padding: 8px 30px 8px 12px;
+      background: rgba(255,255,255,0.06);
+      color: #c8ccd0;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      outline: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%239aa0a6'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      background-size: 9px;
+      transition: all 0.15s ease;
+    }
+    .setting-select:hover { border-color: rgba(255,255,255,0.25); }
+    .setting-select:focus { border-color: #5384fc; box-shadow: 0 0 0 2px rgba(83, 132, 252, 0.15); }
+    .setting-select option {
+      background: #1e1e30;
+      color: #e0e0e0;
+    }
+
+    /* === TOGGLE SWITCH === */
+    .toggle-switch {
+      display: inline-block;
+      position: relative;
+      width: 44px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .toggle-slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(255,255,255,0.12);
+      border-radius: 24px;
+      transition: all 0.2s ease;
+    }
+    .toggle-slider::before {
+      content: '';
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      left: 3px;
+      bottom: 3px;
+      background: #9aa0a6;
+      border-radius: 50%;
+      transition: all 0.2s ease;
+    }
+    .toggle-switch input:checked + .toggle-slider {
+      background: rgba(83, 132, 252, 0.4);
+    }
+    .toggle-switch input:checked + .toggle-slider::before {
+      transform: translateX(20px);
+      background: #5384fc;
+    }
+
+    /* === RADIO GROUP === */
+    .radio-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+    .radio-option {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.15s ease;
+      user-select: none;
+    }
+    .radio-option:hover { background: rgba(255,255,255,0.04); }
+    .radio-option input[type="radio"] {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      border: 2px solid rgba(255,255,255,0.25);
+      border-radius: 50%;
+      background: transparent;
+      cursor: pointer;
+      position: relative;
+      flex-shrink: 0;
+      transition: all 0.15s ease;
+    }
+    .radio-option input[type="radio"]:checked {
+      border-color: #5384fc;
+    }
+    .radio-option input[type="radio"]:checked::after {
+      content: '';
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      background: #5384fc;
+      border-radius: 50%;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+    }
+    .radio-option .radio-label {
+      font-size: 13px;
+      color: #c8ccd0;
+      font-weight: 400;
+    }
+    .radio-option input[type="radio"]:checked ~ .radio-label {
+      color: #e8eaed;
+      font-weight: 500;
+    }
+    .radio-subsection {
+      margin-bottom: 18px;
+    }
+    .radio-subsection:last-child { margin-bottom: 0; }
+    .radio-subsection-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #e0e0e0;
+      margin-bottom: 6px;
+      padding-left: 2px;
+    }
+
+    /* === PATH INPUT === */
+    .path-input-group {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+      width: 100%;
+    }
+    .path-input {
+      flex: 1;
+      padding: 9px 12px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      color: #c8ccd0;
+      font-size: 12px;
+      font-family: 'Consolas', 'Monaco', monospace;
+      outline: none;
+      transition: all 0.15s ease;
+      min-width: 0;
+    }
+    .path-input:focus {
+      border-color: #5384fc;
+      box-shadow: 0 0 0 2px rgba(83, 132, 252, 0.15);
+    }
+    .path-input::placeholder { color: #5f6368; }
+    .path-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 14px;
+      background: rgba(83, 132, 252, 0.12);
+      color: #7cacff;
+      border: 1px solid rgba(83, 132, 252, 0.2);
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+    .path-btn:hover {
+      background: rgba(83, 132, 252, 0.2);
+      border-color: rgba(83, 132, 252, 0.35);
+      color: #a3c4ff;
+    }
+    .path-btn:active { background: rgba(83, 132, 252, 0.3); }
+
+    /* === TOAST / SAVE FEEDBACK === */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      padding: 12px 24px;
+      background: #2e7d32;
+      color: white;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      z-index: 1000;
+      pointer-events: none;
+    }
+    .toast.show {
+      transform: translateX(-50%) translateY(0);
+    }
+    .toast.error {
+      background: #c62828;
+    }
+
+    /* === INFO GRID (about section) === */
+    .info-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .info-card {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 8px;
+      padding: 14px 16px;
+    }
+    .info-card-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: #757575;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 6px;
+    }
+    .info-card-value {
+      font-size: 14px;
+      font-weight: 600;
+      color: #e0e0e0;
+    }
+    .info-card-value.mono {
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 13px;
+    }
+    .info-card-value .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+    .status-dot.online { background: #43a047; box-shadow: 0 0 6px rgba(67,160,71,0.4); }
+    .status-dot.offline { background: #e53935; box-shadow: 0 0 6px rgba(229,57,53,0.4); }
+
+    /* === RESET / DANGER === */
+    .danger-zone {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .danger-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 16px;
+      background: rgba(229, 57, 53, 0.1);
+      color: #ff5252;
+      border: 1px solid rgba(229, 57, 53, 0.2);
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+    .danger-btn:hover {
+      background: rgba(229, 57, 53, 0.2);
+      border-color: rgba(229, 57, 53, 0.35);
+    }
+
+    /* === FOOTER === */
+    .footer {
+      text-align: center;
+      padding: 24px;
+      color: #5f6368;
+      font-size: 11px;
+    }
+    .footer a {
+      color: #7cacff;
+      text-decoration: none;
+    }
+    .footer a:hover { text-decoration: underline; }
+
+    /* === LIGHT THEME === */
+    [data-theme="light"] body,
+    body.theme-light {
+      background: #f5f5f5;
+      color: #1a1a2e;
+    }
+    .theme-light .header,
+    [data-theme="light"] .header { background: linear-gradient(135deg, #e3eafc 0%, #c9d6f0 100%); border-bottom-color: rgba(0,0,0,0.08); }
+    .theme-light .header h1,
+    [data-theme="light"] .header h1 { color: #1a1a2e; }
+    .theme-light .version-badge,
+    [data-theme="light"] .version-badge { background: rgba(83,132,252,0.1); color: #3b6edb; border-color: rgba(83,132,252,0.2); }
+    .theme-light .section,
+    [data-theme="light"] .section { background: rgba(0,0,0,0.02); border-color: rgba(0,0,0,0.08); }
+    .theme-light .section-header,
+    [data-theme="light"] .section-header { border-bottom-color: rgba(0,0,0,0.06); }
+    .theme-light .section-title,
+    [data-theme="light"] .section-title { color: #1a1a2e; }
+    .theme-light .section-subtitle,
+    [data-theme="light"] .section-subtitle { color: #666; }
+    .theme-light .setting-label-text,
+    [data-theme="light"] .setting-label-text { color: #222; }
+    .theme-light .setting-label-desc,
+    [data-theme="light"] .setting-label-desc { color: #888; }
+    .theme-light .setting-row,
+    [data-theme="light"] .setting-row { border-bottom-color: rgba(0,0,0,0.05); }
+    .theme-light .setting-select,
+    [data-theme="light"] .setting-select { background: rgba(0,0,0,0.04); color: #333; border-color: rgba(0,0,0,0.12); }
+    .theme-light .setting-select option,
+    [data-theme="light"] .setting-select option { background: #fff; color: #222; }
+    .theme-light .info-card,
+    [data-theme="light"] .info-card { background: rgba(0,0,0,0.03); border-color: rgba(0,0,0,0.08); }
+    .theme-light .info-card-label,
+    [data-theme="light"] .info-card-label { color: #888; }
+    .theme-light .info-card-value,
+    [data-theme="light"] .info-card-value { color: #222; }
+    .theme-light .path-input,
+    [data-theme="light"] .path-input { background: rgba(0,0,0,0.04); color: #333; border-color: rgba(0,0,0,0.12); }
+    .theme-light .radio-subsection-title,
+    [data-theme="light"] .radio-subsection-title { color: #222; }
+    .theme-light .radio-option:hover,
+    [data-theme="light"] .radio-option:hover { background: rgba(0,0,0,0.04); }
+    .theme-light .radio-option .radio-label,
+    [data-theme="light"] .radio-option .radio-label { color: #444; }
+    .theme-light .radio-option input[type="radio"]:checked ~ .radio-label,
+    [data-theme="light"] .radio-option input[type="radio"]:checked ~ .radio-label { color: #1a1a2e; }
+    .theme-light .radio-option input[type="radio"],
+    [data-theme="light"] .radio-option input[type="radio"] { border-color: rgba(0,0,0,0.25); }
+    .theme-light .path-btn,
+    [data-theme="light"] .path-btn { background: rgba(0,0,0,0.04); color: #333; border-color: rgba(0,0,0,0.12); }
+    .theme-light .path-btn:hover,
+    [data-theme="light"] .path-btn:hover { background: rgba(0,0,0,0.08); color: #111; }
+    .theme-light .danger-btn,
+    [data-theme="light"] .danger-btn { background: rgba(211,47,47,0.08); color: #c62828; border-color: rgba(211,47,47,0.2); }
+    .theme-light .danger-btn:hover,
+    [data-theme="light"] .danger-btn:hover { background: rgba(211,47,47,0.15); }
+    .theme-light .toggle-slider,
+    [data-theme="light"] .toggle-slider { background: rgba(0,0,0,0.15); }
+    .theme-light .toggle-slider::before,
+    [data-theme="light"] .toggle-slider::before { background: #999; }
+    .theme-light .toast,
+    [data-theme="light"] .toast { box-shadow: 0 8px 32px rgba(0,0,0,0.15); }
+    .theme-light .footer,
+    [data-theme="light"] .footer { color: #999; }
+  </style>
+</head>
+<body>
+
+  <!-- HEADER -->
+  <div class="header">
+    <span class="logo">⚙️</span>
+    <div>
+      <h1>Settings</h1>
+    </div>
+    <div class="header-right">
+      <span class="version-badge" id="versionBadge">v—</span>
+    </div>
+  </div>
+
+  <div class="container">
+
+    <!-- ABOUT / STATUS -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-icon blue">ℹ️</div>
+        <div>
+          <div class="section-title">About</div>
+          <div class="section-subtitle">Extension & server information</div>
+        </div>
+      </div>
+      <div class="section-body">
+        <div class="info-grid">
+          <div class="info-card">
+            <div class="info-card-label">Extension</div>
+            <div class="info-card-value" id="extName">Video Downloader</div>
+          </div>
+          <div class="info-card">
+            <div class="info-card-label">Version</div>
+            <div class="info-card-value mono" id="extVersion">—</div>
+          </div>
+          <div class="info-card">
+            <div class="info-card-label">Server Status</div>
+            <div class="info-card-value" id="serverStatus">
+              <span class="status-dot offline"></span> Checking...
+            </div>
+          </div>
+          <div class="info-card">
+            <div class="info-card-label">FFmpeg</div>
+            <div class="info-card-value" id="ffmpegStatus">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DOWNLOAD PREFERENCES -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-icon green">📥</div>
+        <div>
+          <div class="section-title">Download Preferences</div>
+          <div class="section-subtitle">Default quality, audio & subtitle preferences</div>
+        </div>
+      </div>
+      <div class="section-body">
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="setting-label-text">Preferred Video Quality</div>
+            <div class="setting-label-desc">Automatically select the closest available quality</div>
+          </div>
+          <div class="setting-control">
+            <select class="setting-select" id="prefQuality">
+              <option value="highest">Highest Available</option>
+              <option value="2160">4K (2160p)</option>
+              <option value="1440">1440p</option>
+              <option value="1080">1080p</option>
+              <option value="720">720p</option>
+              <option value="480">480p</option>
+              <option value="360">360p</option>
+              <option value="lowest">Lowest Available</option>
+            </select>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="setting-label-text">Preferred Audio Language</div>
+            <div class="setting-label-desc">Auto-select this language when multiple audio tracks are available</div>
+          </div>
+          <div class="setting-control">
+            <select class="setting-select" id="prefAudio">
+              <option value="">Default (first track)</option>
+              <option value="en">English</option>
+              <option value="es">Spanish</option>
+              <option value="fr">French</option>
+              <option value="de">German</option>
+              <option value="it">Italian</option>
+              <option value="pt">Portuguese</option>
+              <option value="ja">Japanese</option>
+              <option value="ko">Korean</option>
+              <option value="zh">Chinese</option>
+              <option value="ar">Arabic</option>
+              <option value="hi">Hindi</option>
+              <option value="ru">Russian</option>
+            </select>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="setting-label-text">Preferred Subtitle Language</div>
+            <div class="setting-label-desc">Auto-select this language when subtitles are detected</div>
+          </div>
+          <div class="setting-control">
+            <select class="setting-select" id="prefSubtitle">
+              <option value="">None (no subtitles)</option>
+              <option value="en">English</option>
+              <option value="es">Spanish</option>
+              <option value="fr">French</option>
+              <option value="de">German</option>
+              <option value="it">Italian</option>
+              <option value="pt">Portuguese</option>
+              <option value="ja">Japanese</option>
+              <option value="ko">Korean</option>
+              <option value="zh">Chinese</option>
+              <option value="ar">Arabic</option>
+              <option value="hi">Hindi</option>
+              <option value="ru">Russian</option>
+            </select>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="setting-label-text">Auto-Select Best Quality</div>
+            <div class="setting-label-desc">Automatically pick the quality closest to your preference when scanning</div>
+          </div>
+          <div class="setting-control">
+            <label class="toggle-switch">
+              <input type="checkbox" id="autoSelectQuality" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- APPEARANCE -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-icon blue">🎨</div>
+        <div>
+          <div class="section-title">Appearance</div>
+          <div class="section-subtitle">Theme, preview & layout settings</div>
+        </div>
+      </div>
+      <div class="section-body">
+        <div class="radio-subsection">
+          <div class="radio-subsection-title">Theme</div>
+          <div class="radio-group" id="themeGroup">
+            <label class="radio-option">
+              <input type="radio" name="theme" value="system" checked>
+              <span class="radio-label">System</span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="theme" value="dark">
+              <span class="radio-label">Dark</span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="theme" value="light">
+              <span class="radio-label">Light</span>
+            </label>
+          </div>
+        </div>
+        <div class="radio-subsection">
+          <div class="radio-subsection-title">Panel Position</div>
+          <div class="radio-group" id="panelPositionGroup">
+            <label class="radio-option">
+              <input type="radio" name="panelPosition" value="popup" checked>
+              <span class="radio-label">Show in popup</span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="panelPosition" value="sidebar">
+              <span class="radio-label">Show in sidebar</span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DOWNLOAD DIRECTORY -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-icon orange">📁</div>
+        <div>
+          <div class="section-title">Download Directory</div>
+          <div class="section-subtitle">Where downloaded videos are saved</div>
+        </div>
+      </div>
+      <div class="section-body">
+        <div class="setting-row" style="flex-direction: column; align-items: stretch;">
+          <div class="setting-label">
+            <div class="setting-label-text">Current Download Path</div>
+            <div class="setting-label-desc">Files are saved to this folder by the local server</div>
+          </div>
+          <div class="path-input-group">
+            <input type="text" class="path-input" id="downloadPath" placeholder="Loading..." readonly>
+            <button class="path-btn" id="changeDirBtn" title="Change download directory">📂 Change</button>
+            <button class="path-btn" id="openDirBtn" title="Open in file explorer">📂 Open</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="setting-label-text">Filename Format</div>
+            <div class="setting-label-desc">How downloaded files are named</div>
+          </div>
+          <div class="setting-control">
+            <select class="setting-select" id="filenameFormat">
+              <option value="title">Page Title</option>
+              <option value="title-quality">Page Title — Quality</option>
+              <option value="title-date">Page Title — Date</option>
+              <option value="original">Original Filename</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- GENERAL -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-icon purple">🎛️</div>
+        <div>
+          <div class="section-title">General</div>
+          <div class="section-subtitle">Interface & behavior settings</div>
+        </div>
+      </div>
+      <div class="section-body">
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="setting-label-text">Download History</div>
+            <div class="setting-label-desc">Record completed downloads in the history page</div>
+          </div>
+          <div class="setting-control">
+            <label class="toggle-switch">
+              <input type="checkbox" id="historyEnabled" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="setting-label-text">Desktop Notifications</div>
+            <div class="setting-label-desc">Show a notification when a download completes</div>
+          </div>
+          <div class="setting-control">
+            <label class="toggle-switch">
+              <input type="checkbox" id="notificationsEnabled">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="setting-label-text">Auto-Scan on Page Load</div>
+            <div class="setting-label-desc">Automatically scan for videos when opening the popup</div>
+          </div>
+          <div class="setting-control">
+            <label class="toggle-switch">
+              <input type="checkbox" id="autoScanEnabled" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DANGER ZONE -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-icon red">⚠️</div>
+        <div>
+          <div class="section-title">Reset</div>
+          <div class="section-subtitle">Reset settings to factory defaults</div>
+        </div>
+      </div>
+      <div class="section-body">
+        <div class="danger-zone">
+          <div class="setting-label">
+            <div class="setting-label-text">Reset All Settings</div>
+            <div class="setting-label-desc">Restore every setting on this page to its default value</div>
+          </div>
+          <button class="danger-btn" id="resetBtn">🔄 Reset Defaults</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="footer">
+    Video & Stream Downloader — Built with ❤️
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast">Saved!</div>
+
+  <script src="settings.js"></script>
+</body>
+</html>
