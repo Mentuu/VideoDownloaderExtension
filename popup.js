@@ -24,6 +24,11 @@ let capturedSubtitles = [];
 let serverAvailable = false;
 let userPrefs = { prefQuality: 'highest', prefAudio: '', prefSubtitle: '', autoSelectQuality: true };
 let currentScanTabId = null;
+const DEBUG_LOGS = false;
+
+function logDebug(...args) {
+  if (DEBUG_LOGS) console.log(...args);
+}
 
 // Load user preferences
 chrome.storage.local.get(['prefQuality', 'prefAudio', 'prefSubtitle', 'autoSelectQuality'], (result) => {
@@ -62,6 +67,16 @@ function findBestLangIndex(tracks, prefLang) {
     if (tl === lc || tl.startsWith(lc) || tn.includes(lc)) return i;
   }
   return -1;
+}
+
+function isWeakQualityList(qualities) {
+  const list = Array.isArray(qualities) ? qualities : [];
+  if (list.length <= 1) return true;
+  const useful = list.filter((q) => {
+    const l = String((q && q.label) || '').toLowerCase();
+    return l && !l.includes('default') && !l.includes('unknown');
+  });
+  return useful.length <= 1;
 }
 let ws = null;
 let progressPort = null;
@@ -230,10 +245,7 @@ function scanAll() {
       if (streamResp && streamResp.serverAvailable && (!ws || ws.readyState !== WebSocket.OPEN)) {
         connectWebSocket();
       }
-      chrome.tabs.sendMessage(tabId, {action: 'getVideos'}, (videoResp) => {
-        if (chrome.runtime.lastError) { /* tab may not have content script */ }
-        displayResults(streamResp, videoResp);
-      });
+      displayResults(streamResp);
     });
   });
 }
@@ -243,10 +255,27 @@ function dedupNormalizeText(value) {
   return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+function getQualityHeight(value) {
+  const match = String(value || '').match(/(\d{3,4})p/i);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+function buildYouTubeVariantLabel(variant) {
+  const formatLabel = String(variant.format || 'mp4').toUpperCase();
+  let label = formatLabel + ' - ' + (variant.quality || 'Unknown');
+  if (variant.fps) label += ' - ' + variant.fps + 'fps';
+  if (variant.audioUrl) label += ' - video-only';
+  return label;
+}
+
+function isYouTubeSource(video) {
+  return /^youtube-/.test(String((video && video.source) || ''));
+}
+
 function mergeDuplicateVideos(videos) {
   const groups = new Map();
   videos.forEach((video) => {
-    // Group by normalized title + duration.  Fallback to URL if no title.
+    // Group by normalized title + duration. If title is missing, use URL.
     const title = dedupNormalizeText(video.pageTitle || video.title || '');
     const dur = String(video.durationSeconds || video.duration || '');
     const key = title ? (title + '|' + dur) : ('url:' + (video.url || video.src || ''));
@@ -254,39 +283,76 @@ function mergeDuplicateVideos(videos) {
     groups.get(key).push(video);
   });
 
-  console.log('[DEDUP] Candidates:', videos.length, '→ Groups:', groups.size);
+  logDebug('[DEDUP] Candidates:', videos.length, '→ Groups:', groups.size);
 
   const merged = [];
   groups.forEach((items, key) => {
+    const dashItems = items.filter(v => v.videoType === 'stream' && v.type === 'DASH');
+    const hlsItems = items.filter(v => v.videoType === 'stream' && v.type === 'HLS');
+    const youtubeStreams = items
+      .filter(v =>
+        v.videoType === 'stream' &&
+        /^youtube-/.test(String(v.source || '')) &&
+        (v.format === 'mp4' || v.format === 'webm' || v.type === 'MP4' || v.type === 'WEBM')
+      )
+      .sort((a, b) => {
+        const hDiff = getQualityHeight(b.quality) - getQualityHeight(a.quality);
+        if (hDiff !== 0) return hDiff;
+        return String(a.audioUrl ? '1' : '0').localeCompare(String(b.audioUrl ? '1' : '0'));
+      });
+
     // Pick primary using explicit priority: HLS > DASH > stream > direct > page
     let primary = null;
-    const hlsItems = items.filter(v => v.videoType === 'stream' && v.type === 'HLS');
-    if (hlsItems.length > 0) {
-      // Prefer master playlist for richer quality options
-      primary = hlsItems.find(v => {
-        const q = String(v.quality || '').toLowerCase();
-        const u = (v.url || '').toLowerCase();
-        return q.includes('master') || u.includes('master');
-      }) || hlsItems[0];
+    // For YouTube, prefer DASH manifest when available. It is the most reliable
+    // source for complete quality ladders on current player versions.
+    if (youtubeStreams.length > 0 && dashItems.length > 0) {
+      primary = dashItems[0];
+    } else if (youtubeStreams.length > 0) {
+      const variantMap = new Map();
+      youtubeStreams.forEach(v => {
+        const variantKey = v.url || '';
+        if (!variantMap.has(variantKey)) {
+          variantMap.set(variantKey, {
+            url: v.url,
+            audioUrl: v.audioUrl || null,
+            quality: v.quality || 'Unknown',
+            label: buildYouTubeVariantLabel(v),
+            fps: v.fps || null,
+            format: v.format || (String(v.type || '').toLowerCase() === 'webm' ? 'webm' : 'mp4')
+          });
+        }
+      });
+      primary = { ...youtubeStreams[0], streamVariants: Array.from(variantMap.values()), streamVariantsSource: 'youtube' };
+    } else {
+      if (hlsItems.length > 0) {
+        // Prefer master playlist for richer quality options.
+        primary = hlsItems.find(v => {
+          const q = String(v.quality || '').toLowerCase();
+          const u = (v.url || '').toLowerCase();
+          return q.includes('master') || u.includes('master');
+        });
+        if (!primary) {
+          primary = hlsItems
+            .slice()
+            .sort((a, b) => getQualityHeight(String(b.quality || '')) - getQualityHeight(String(a.quality || '')))[0] || hlsItems[0];
+        }
+      }
+      if (!primary && dashItems.length > 0) primary = dashItems[0];
+      if (!primary) primary = items.find(v => v.videoType === 'stream');
+      if (!primary) primary = items.find(v => v.videoType === 'direct');
+      if (!primary) primary = items[0];
     }
-    if (!primary) primary = items.find(v => v.videoType === 'stream' && v.type === 'DASH');
-    if (!primary) primary = items.find(v => v.videoType === 'stream');
-    if (!primary) primary = items.find(v => v.videoType === 'direct');
-    if (!primary) primary = items[0];
 
-    console.log('[DEDUP] Group "' + key + '" (' + items.length + ' items) → primary: ' + primary.videoType + '/' + primary.type);
+    logDebug('[DEDUP] Group "' + key + '" (' + items.length + ' items) → primary: ' + primary.videoType + '/' + primary.type);
     merged.push({ ...primary });
   });
 
   return merged;
 }
 
-function displayResults(streamResp, videoResp) {
+function displayResults(streamResp) {
   const streams = (streamResp && streamResp.streams) || [];
   const videos = (streamResp && streamResp.videos) || [];
-  const pageVideos = (videoResp && videoResp.videos) || [];
-  const pageThumbnail = (videoResp && videoResp.pageThumbnail) || (streamResp && streamResp.pageThumbnail) || null;
-  const pageDuration = (videoResp && videoResp.pageDuration) || null;
   
   // Store captured subtitle URLs from network requests
   capturedSubtitles = (streamResp && streamResp.capturedSubtitles) || [];
@@ -297,25 +363,18 @@ function displayResults(streamResp, videoResp) {
       ...s,
       videoType: 'stream',
       category: s.type,
-      thumbnail: s.thumbnail || s.poster || pageThumbnail,
-      duration: s.duration || (pageDuration ? pageDuration.formatted : null),
-      durationSeconds: s.durationSeconds || (pageDuration ? pageDuration.seconds : null),
+      thumbnail: s.thumbnail || s.poster || null,
+      duration: s.duration || null,
+      durationSeconds: s.durationSeconds || null,
       headers: s.headers || null
     })),
     ...videos.map(v => ({
       ...v,
       videoType: 'direct',
       category: 'MP4',
-      thumbnail: v.thumbnail || v.poster || pageThumbnail,
-      duration: v.duration || (pageDuration ? pageDuration.formatted : null),
-      durationSeconds: v.durationSeconds || (pageDuration ? pageDuration.seconds : null)
-    })),
-    ...pageVideos.filter(v => !v.isBlob).map(v => ({
-      ...v,
-      url: v.url || v.src,
-      videoType: 'page',
-      category: 'VIDEO',
-      thumbnail: v.thumbnail || v.poster || pageThumbnail
+      thumbnail: v.thumbnail || v.poster || null,
+      duration: v.duration || null,
+      durationSeconds: v.durationSeconds || null
     }))
   ];
   allVideos = mergeDuplicateVideos(allCandidates);
@@ -355,6 +414,12 @@ function createVideoItem(video, index) {
   item.className = 'item';
   
   const isStream = video.videoType === 'stream';
+  const hasYouTubeVariants = isStream &&
+    Array.isArray(video.streamVariants) &&
+    video.streamVariants.length > 1 &&
+    (video.streamVariantsSource === 'youtube' || isYouTubeSource(video));
+  const shouldFetchServerQualities = isStream && serverAvailable && (video.type === 'HLS' || video.type === 'DASH');
+  const shouldShowQualitySelect = shouldFetchServerQualities || hasYouTubeVariants;
   
   // Title
   let title = video.pageTitle || video.title || ('Video ' + (index + 1));
@@ -391,8 +456,8 @@ function createVideoItem(video, index) {
       '<div class="item-meta">' + badgeHTML + durationHTML + dimsHTML + '</div>' +
     '</div>' +
     '<div class="item-actions">' +
-      (isStream && video.type === 'HLS' && serverAvailable ? '<select class="quality-select" disabled><option>Loading...</option></select><select class="audio-select" style="display:none"></select>' : '') +
-      (serverAvailable ? '<select class="format-select"><option value="mp4">MP4</option><option value="mkv">MKV</option><option value="webm">WebM</option></select>' : '') +
+      (shouldShowQualitySelect ? '<select class="quality-select"' + (shouldFetchServerQualities ? ' disabled' : '') + '><option>' + (shouldFetchServerQualities ? 'Loading...' : 'Select quality') + '</option></select>' : '') +
+      (shouldFetchServerQualities ? '<select class="audio-select" style="display:none"></select>' : '') +
       (serverAvailable ? '<select class="subtitle-select" style="display:none"></select>' : '') +
       '<button class="download-btn"><span class="btn-icon">\u2B07</span><span class="btn-text">Download</span></button>' +
     '</div>';
@@ -401,13 +466,49 @@ function createVideoItem(video, index) {
   const qualitySelect = item.querySelector('.quality-select');
   const audioSelect = item.querySelector('.audio-select');
   const subtitleSelect = item.querySelector('.subtitle-select');
+
+  // Pre-populate quality selector for YouTube stream variants
+  const canUseCapturedVariants = hasYouTubeVariants || (isStream && Array.isArray(video.streamVariants) && video.streamVariants.length > 1 && !shouldFetchServerQualities);
+
+  if (canUseCapturedVariants && qualitySelect) {
+    qualitySelect.innerHTML = '';
+    const variantQualities = video.streamVariants.map(v => ({
+      url: v.url,
+      audioUrl: v.audioUrl || null,
+      label: v.label || buildYouTubeVariantLabel(v),
+      quality: v.quality || 'Unknown',
+      format: v.format || null
+    }));
+    variantQualities.forEach((q, i) => {
+      const opt = document.createElement('option');
+      opt.value = i;
+      opt.textContent = q.label;
+      qualitySelect.appendChild(opt);
+    });
+    qualitySelect.dataset.qualities = JSON.stringify(variantQualities);
+    qualitySelect.disabled = false;
+    if (userPrefs.autoSelectQuality && variantQualities.length > 1) {
+      qualitySelect.value = findBestQualityIndex(variantQualities, userPrefs.prefQuality);
+    }
+  }
   
-  // Auto-fetch qualities for HLS streams
-  if (isStream && video.type === 'HLS' && serverAvailable && qualitySelect) {
+  // Auto-fetch qualities for HLS/DASH streams
+  if (shouldFetchServerQualities && qualitySelect) {
     chrome.runtime.sendMessage({
       action: 'getQualities', url: video.url, headers: video.headers || null
     }, (resp) => {
       if (resp && resp.success && resp.qualities && resp.qualities.length > 0) {
+        let existingQualities = [];
+        try {
+          existingQualities = qualitySelect.dataset.qualities ? JSON.parse(qualitySelect.dataset.qualities) : [];
+        } catch (e) {
+          existingQualities = [];
+        }
+        const keepExisting = existingQualities.length > 1 && isWeakQualityList(resp.qualities);
+        if (keepExisting) {
+          qualitySelect.disabled = false;
+          return;
+        }
         qualitySelect.innerHTML = '';
         resp.qualities.forEach((q, i) => {
           const opt = document.createElement('option');
@@ -449,7 +550,7 @@ function createVideoItem(video, index) {
         }
         
         // Populate subtitle track selector if available
-        // Use HLS subtitleTracks first, fallback to captured network subtitle URLs
+        // Prefer HLS subtitleTracks; if unavailable, use captured network subtitle URLs.
         let subTracks = (resp.subtitleTracks && resp.subtitleTracks.length > 0) ? resp.subtitleTracks : null;
         if (!subTracks && capturedSubtitles.length > 0) {
           subTracks = capturedSubtitles.map(s => ({
@@ -477,8 +578,18 @@ function createVideoItem(video, index) {
           }
         }
       } else {
-        // No qualities or error - hide select, download will use original URL
-        qualitySelect.style.display = 'none';
+        // No qualities or error - keep existing if already populated, otherwise hide.
+        let existingQualities = [];
+        try {
+          existingQualities = qualitySelect.dataset.qualities ? JSON.parse(qualitySelect.dataset.qualities) : [];
+        } catch (e) {
+          existingQualities = [];
+        }
+        if (existingQualities.length > 0) {
+          qualitySelect.disabled = false;
+        } else {
+          qualitySelect.style.display = 'none';
+        }
       }
     });
   }
@@ -512,71 +623,87 @@ function createVideoItem(video, index) {
     this.disabled = true;
     this.innerHTML = '<span class="btn-icon spin">&#8635;</span><span class="btn-text">Starting</span>';
     this.className = 'download-btn btn-starting';
-    
-    if (serverAvailable) {
-      let downloadUrl = video.url || video.src;
-      let audioUrl = null;
-      // Use selected quality if available
-      if (isStream && qualitySelect && qualitySelect.dataset.qualities) {
-        try {
-          const qualities = JSON.parse(qualitySelect.dataset.qualities);
-          const idx = parseInt(qualitySelect.value);
-          if (qualities[idx]) {
-            downloadUrl = qualities[idx].url;
-            audioUrl = qualities[idx].audioUrl || null;
-          }
-        } catch(e) {}
-      }
-      // Override audio with user-selected audio track
-      // Resolve from the correct audio group matching the selected video quality
-      if (isStream && audioSelect && audioSelect.dataset.audioTracks) {
-        try {
-          const tracks = JSON.parse(audioSelect.dataset.audioTracks);
-          const aidx = parseInt(audioSelect.value);
-          if (tracks[aidx]) {
-            const selectedTrack = tracks[aidx];
-            // Try to get the audio URL from the group that matches the selected video variant
-            const groupMap = audioSelect.dataset.audioGroupMap ? JSON.parse(audioSelect.dataset.audioGroupMap) : null;
-            if (groupMap && qualitySelect && qualitySelect.dataset.qualities) {
-              const qualities = JSON.parse(qualitySelect.dataset.qualities);
-              const vidIdx = parseInt(qualitySelect.value);
-              const variantGroupId = qualities[vidIdx] && qualities[vidIdx].audioGroupId;
-              const langKey = selectedTrack.language || selectedTrack.name;
-              if (variantGroupId && groupMap[variantGroupId] && groupMap[variantGroupId][langKey]) {
-                audioUrl = groupMap[variantGroupId][langKey];
-              } else {
-                audioUrl = selectedTrack.url;
-              }
+
+    if (!serverAvailable) {
+      this.disabled = false;
+      this.innerHTML = '<span class="btn-icon">&#9888;</span><span class="btn-text">Server Required</span>';
+      this.className = 'download-btn btn-failed';
+      updateStatus('Local server is required for downloads.', 'error');
+      return;
+    }
+
+    let downloadUrl = video.url || video.src;
+    let audioUrl = null;
+    let dashVideoIndex = null;
+    let dashAudioIndex = null;
+    // Use selected quality if available
+    if (isStream && qualitySelect && qualitySelect.dataset.qualities) {
+      try {
+        const qualities = JSON.parse(qualitySelect.dataset.qualities);
+        const idx = parseInt(qualitySelect.value);
+        if (qualities[idx]) {
+          downloadUrl = qualities[idx].url;
+          audioUrl = qualities[idx].audioUrl || null;
+          if (typeof qualities[idx].dashVideoIndex === 'number') dashVideoIndex = qualities[idx].dashVideoIndex;
+          if (typeof qualities[idx].dashAudioIndex === 'number') dashAudioIndex = qualities[idx].dashAudioIndex;
+        }
+      } catch(e) {}
+    }
+    // Override audio with user-selected audio track
+    // Resolve from the correct audio group matching the selected video quality
+    if (isStream && audioSelect && audioSelect.dataset.audioTracks) {
+      try {
+        const tracks = JSON.parse(audioSelect.dataset.audioTracks);
+        const aidx = parseInt(audioSelect.value);
+        if (tracks[aidx]) {
+          const selectedTrack = tracks[aidx];
+          // Try to get the audio URL from the group that matches the selected video variant
+          const groupMap = audioSelect.dataset.audioGroupMap ? JSON.parse(audioSelect.dataset.audioGroupMap) : null;
+          if (groupMap && qualitySelect && qualitySelect.dataset.qualities) {
+            const qualities = JSON.parse(qualitySelect.dataset.qualities);
+            const vidIdx = parseInt(qualitySelect.value);
+            const variantGroupId = qualities[vidIdx] && qualities[vidIdx].audioGroupId;
+            const langKey = selectedTrack.language || selectedTrack.name;
+            if (variantGroupId && groupMap[variantGroupId] && groupMap[variantGroupId][langKey]) {
+              audioUrl = groupMap[variantGroupId][langKey];
             } else {
               audioUrl = selectedTrack.url;
             }
+          } else {
+            audioUrl = selectedTrack.url;
           }
-        } catch(e) {}
-      }
-      const formatSelect = item.querySelector('.format-select');
-      const outputFormat = formatSelect ? formatSelect.value : 'mp4';
-      const ext = outputFormat || 'mp4';
-      const filename = sanitizeFilename(title) + '.' + ext;
-      const dlType = video.type || (video.format ? video.format.toUpperCase() : 'MP4');
-      // Get selected subtitle track URL (works for both HLS and direct video)
-      let subtitleUrl = null;
-      if (subtitleSelect && subtitleSelect.dataset.subtitleTracks) {
-        try {
-          const subIdx = parseInt(subtitleSelect.value);
-          if (subIdx >= 0) {
-            const subTracks = JSON.parse(subtitleSelect.dataset.subtitleTracks);
-            if (subTracks[subIdx]) subtitleUrl = subTracks[subIdx].url;
+          if (typeof selectedTrack.dashAudioIndex === 'number') {
+            dashAudioIndex = selectedTrack.dashAudioIndex;
           }
-        } catch(e) {}
-      }
-      // Fallback: use audioUrl from YouTube adaptive format if no quality/audio selection override
-      if (!audioUrl && video.audioUrl) audioUrl = video.audioUrl;
-      downloadStream(downloadUrl, filename, dlType, this, item, video.headers, video.url || video.src, audioUrl, subtitleUrl, outputFormat);
-    } else {
-      // Fallback to Chrome download when server is offline
-      const filename = sanitizeFilename(title) + '.' + (video.format || 'mp4');
-      downloadVideo(video.url || video.src, filename, this, item);
+        }
+      } catch(e) {}
     }
+    let outputFormat = String(video.format || 'mp4').toLowerCase();
+    if (qualitySelect && qualitySelect.dataset.qualities) {
+      try {
+        const qualities = JSON.parse(qualitySelect.dataset.qualities);
+        const idx = parseInt(qualitySelect.value, 10);
+        if (qualities[idx] && qualities[idx].format) {
+          outputFormat = String(qualities[idx].format).toLowerCase();
+        }
+      } catch (e) {}
+    }
+    const ext = outputFormat || 'mp4';
+    const filename = sanitizeFilename(title) + '.' + ext;
+    const dlType = video.type || (video.format ? video.format.toUpperCase() : 'MP4');
+    // Get selected subtitle track URL (works for both HLS and direct video)
+    let subtitleUrl = null;
+    if (subtitleSelect && subtitleSelect.dataset.subtitleTracks) {
+      try {
+        const subIdx = parseInt(subtitleSelect.value);
+        if (subIdx >= 0) {
+          const subTracks = JSON.parse(subtitleSelect.dataset.subtitleTracks);
+          if (subTracks[subIdx]) subtitleUrl = subTracks[subIdx].url;
+        }
+      } catch(e) {}
+    }
+    if (!audioUrl && video.audioUrl) audioUrl = video.audioUrl;
+    downloadStream(downloadUrl, filename, dlType, this, item, video.headers, video.url || video.src, audioUrl, subtitleUrl, outputFormat, dashVideoIndex, dashAudioIndex);
   });
   
   return item;
@@ -669,8 +796,8 @@ function attachProgressUI(item, dl) {
     this.disabled = true;
     this.innerHTML = '<span class="btn-icon spin">&#8635;</span><span class="btn-text">Cancelling</span>';
     chrome.runtime.sendMessage({ action: 'cancelDownload', downloadId: dlId });
-    // UI reset is handled by the WebSocket 'cancelled' status handler
-    // Fallback: if WebSocket message doesn't arrive within 3s, force reset
+    // UI reset is handled by the WebSocket 'cancelled' status handler.
+    // Keep a timeout guard in case the status message is dropped.
     setTimeout(() => {
       if (item.querySelector('.btn-cancel')) {
         updateStreamProgress(dlId, { status: 'cancelled' });
@@ -686,6 +813,7 @@ function attachProgressUI(item, dl) {
 function getThumbnailClass(video) {
   if (video.type === 'HLS') return 'th-hls';
   if (video.type === 'DASH') return 'th-dash';
+  if (video.format === 'webm' || video.category === 'WEBM') return 'th-mp4';
   if (video.format === 'mp4' || video.category === 'MP4') return 'th-mp4';
   return 'th-video';
 }
@@ -693,6 +821,7 @@ function getThumbnailClass(video) {
 function getThumbnailLabel(video) {
   if (video.type === 'HLS') return 'HLS';
   if (video.type === 'DASH') return 'DASH';
+  if (video.format === 'webm' || video.category === 'WEBM') return 'WEBM';
   if (video.format === 'mp4' || video.category === 'MP4') return 'MP4';
   return '\u25B6';
 }
@@ -700,6 +829,7 @@ function getThumbnailLabel(video) {
 function getBadgeClass(video) {
   if (video.type === 'HLS') return 'badge-hls';
   if (video.type === 'DASH') return 'badge-dash';
+  if (video.format === 'webm') return 'badge-mp4';
   if (video.format === 'mp4') return 'badge-mp4';
   return 'badge-direct';
 }
@@ -707,13 +837,14 @@ function getBadgeClass(video) {
 function getBadgeText(video) {
   if (video.type === 'HLS') return 'HLS';
   if (video.type === 'DASH') return 'DASH';
+  if (video.format === 'webm') return video.quality ? 'WEBM ' + video.quality : 'WEBM';
   if (video.format === 'mp4') return video.quality ? 'MP4 ' + video.quality : 'MP4';
   return video.category || 'VIDEO';
 }
 
-function downloadStream(url, filename, type, button, item, headers, originalUrl, audioUrl, subtitleUrl, outputFormat) {
+function downloadStream(url, filename, type, button, item, headers, originalUrl, audioUrl, subtitleUrl, outputFormat, dashVideoIndex, dashAudioIndex) {
   chrome.runtime.sendMessage({
-    action: 'downloadViaServer', url: url, filename: filename, type: type, headers: headers || null, originalUrl: originalUrl || url, audioUrl: audioUrl || null, subtitleUrl: subtitleUrl || null, outputFormat: outputFormat || 'mp4'
+    action: 'downloadViaServer', url: url, filename: filename, type: type, headers: headers || null, originalUrl: originalUrl || url, audioUrl: audioUrl || null, subtitleUrl: subtitleUrl || null, outputFormat: outputFormat || 'mp4', dashVideoIndex: (typeof dashVideoIndex === 'number' ? dashVideoIndex : null), dashAudioIndex: (typeof dashAudioIndex === 'number' ? dashAudioIndex : null)
   }, (response) => {
     if (response && response.success) {
       const dlId = response.data.downloadId;
@@ -740,8 +871,8 @@ function downloadStream(url, filename, type, button, item, headers, originalUrl,
         this.disabled = true;
         this.innerHTML = '<span class="btn-icon spin">&#8635;</span><span class="btn-text">Cancelling</span>';
         chrome.runtime.sendMessage({ action: 'cancelDownload', downloadId: dlId });
-        // UI reset is handled by the WebSocket 'cancelled' status handler
-        // Fallback: if WebSocket message doesn't arrive within 3s, force reset
+        // UI reset is handled by the WebSocket 'cancelled' status handler.
+        // Keep a timeout guard in case the status message is dropped.
         setTimeout(() => {
           if (item.querySelector('.btn-cancel')) {
             updateStreamProgress(dlId, { status: 'cancelled' });
@@ -755,36 +886,6 @@ function downloadStream(url, filename, type, button, item, headers, originalUrl,
       button.className = 'download-btn btn-failed';
       button.disabled = false;
       updateStatus('Server error occurred', 'error');
-    }
-  });
-}
-
-function downloadVideo(url, filename, button, item) {
-  // Validate URL before attempting download
-  if (!url || !url.startsWith('http')) {
-    button.innerHTML = '<span class="btn-icon">\u2716</span><span class="btn-text">Invalid URL</span>';
-    button.className = 'download-btn btn-failed';
-    button.disabled = false;
-    updateStatus('Invalid video URL', 'error');
-    return;
-  }
-  
-  chrome.runtime.sendMessage({
-    action: 'download', url: url, filename: filename
-  }, (response) => {
-    if (response && response.success) {
-      button.innerHTML = '<span class="btn-icon spin">&#8635;</span><span class="btn-text">0%</span>';
-      button.className = 'download-btn btn-downloading';
-      updateStatus('Download started', 'loading');
-      const bodyDiv = item.querySelector('.item-body');
-      bodyDiv.insertAdjacentHTML('beforeend',
-        '<div class="progress-container" data-chrome-download-id="' + response.downloadId + '"><div class="progress-bar" style="width: 0%">0%</div></div><div class="progress-info">Starting...</div>'
-      );
-    } else {
-      button.innerHTML = '<span class="btn-icon">\u2716</span><span class="btn-text">Failed</span>';
-      button.className = 'download-btn btn-failed';
-      button.disabled = false;
-      updateStatus('Download failed', 'error');
     }
   });
 }

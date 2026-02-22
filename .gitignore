@@ -2,3 +2,8 @@ node_modules/
 .vscode/
 package-lock.json
 installAndRun.bat
+.playwright-cli/
+.tmp-*/
+.tmp_*.html
+.tmp_*.js
+*-player-script.js

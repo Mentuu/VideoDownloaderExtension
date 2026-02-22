@@ -1,6 +1,11 @@
 let streamData = {};
 const SERVER_URL = 'http://localhost:3000';
 let serverAvailable = false;
+const DEBUG_LOGS = false;
+
+function logDebug(...args) {
+  if (DEBUG_LOGS) console.log(...args);
+}
 
 // === Panel Position: popup vs sidebar ===
 function applyPanelPosition(position) {
@@ -109,6 +114,20 @@ function extractYouTubeFromMainWorld(tabId, callback) {
         var pr = null;
         var source = '';
 
+        function safeQualityLabel(fmt) {
+          if (!fmt) return 'Unknown';
+          if (fmt.qualityLabel) return fmt.qualityLabel;
+          if (fmt.height) return fmt.height + 'p';
+          return 'Unknown';
+        }
+
+        function getContainerFromMime(mimeType) {
+          if (!mimeType) return null;
+          if (mimeType.indexOf('mp4') !== -1) return 'mp4';
+          if (mimeType.indexOf('webm') !== -1) return 'webm';
+          return null;
+        }
+
         // Source 1: global ytInitialPlayerResponse (fresh page load)
         if (window.ytInitialPlayerResponse && window.ytInitialPlayerResponse.streamingData) {
           pr = window.ytInitialPlayerResponse;
@@ -123,10 +142,10 @@ function extractYouTubeFromMainWorld(tabId, callback) {
               var resp = player.getPlayerResponse();
               if (resp && resp.streamingData) { pr = resp; source = 'playerAPI'; }
             }
-          } catch(e) {}
+          } catch (e) {}
         }
 
-        // Source 3: ytd-player Polymer element (fallback)
+        // Source 3: ytd-player Polymer element
         if (!pr) {
           try {
             var ytdPlayer = document.querySelector('ytd-player');
@@ -134,69 +153,114 @@ function extractYouTubeFromMainWorld(tabId, callback) {
               var resp2 = ytdPlayer.player_.getPlayerResponse();
               if (resp2 && resp2.streamingData) { pr = resp2; source = 'polymer'; }
             }
-          } catch(e) {}
+          } catch (e) {}
         }
 
         if (!pr || !pr.streamingData) {
-          return { streams: [], debug: { found: false } };
+          return { streams: [], debug: { found: false, reason: 'no-player-response' } };
         }
 
         var sd = pr.streamingData;
-        var streams = [];
-        var hasSignatureCipher = false;
 
-        // 1) DASH manifest (live streams)
+        var streams = [];
+
         if (sd.dashManifestUrl) {
-          streams.push({ url: sd.dashManifestUrl, type: 'DASH', format: 'mpd', quality: 'Manifest' });
+          streams.push({ url: sd.dashManifestUrl, type: 'DASH', format: 'mpd', quality: 'Manifest', source: 'youtube-manifest' });
         }
-        // 2) HLS manifest (live streams)
         if (sd.hlsManifestUrl) {
-          streams.push({ url: sd.hlsManifestUrl, type: 'HLS', format: 'm3u8', quality: 'Master' });
+          streams.push({ url: sd.hlsManifestUrl, type: 'HLS', format: 'm3u8', quality: 'Master', source: 'youtube-manifest' });
         }
-        // 3) Adaptive formats (1080p+, separate video+audio)
-        if (streams.length === 0 && sd.adaptiveFormats && sd.adaptiveFormats.length > 0) {
-          var audioArr = [];
+
+        var resolvedAdaptive = [];
+        for (var i = 0; i < (sd.adaptiveFormats || []).length; i++) {
+          var af = sd.adaptiveFormats[i];
+          if (!af || !af.url || !af.mimeType) continue;
+          resolvedAdaptive.push(af);
+        }
+
+        if (resolvedAdaptive.length > 0) {
+          var audioByContainer = { mp4: [], webm: [] };
+          var allAudio = [];
           var videoArr = [];
-          for (var i = 0; i < sd.adaptiveFormats.length; i++) {
-            var f = sd.adaptiveFormats[i];
-            if (!f.mimeType) continue;
-            if (!f.url) { hasSignatureCipher = true; continue; }
-            if (f.mimeType.indexOf('audio/mp4') === 0) audioArr.push(f);
-            if (f.mimeType.indexOf('video/mp4') === 0 && f.qualityLabel) videoArr.push(f);
+          var seenAdaptive = {};
+          for (var ra = 0; ra < resolvedAdaptive.length; ra++) {
+            var f = resolvedAdaptive[ra];
+            var fmtContainer = getContainerFromMime(f.mimeType);
+            if (!fmtContainer) continue;
+            if (f.mimeType.indexOf('audio/') === 0) {
+              audioByContainer[fmtContainer].push(f);
+              allAudio.push(f);
+            }
+            if (f.mimeType.indexOf('video/') === 0) videoArr.push(f);
           }
-          audioArr.sort(function(a,b) { return (b.bitrate||0) - (a.bitrate||0); });
-          videoArr.sort(function(a,b) { return (b.height||0) - (a.height||0); });
-          if (videoArr.length > 0 && audioArr.length > 0) {
+          audioByContainer.mp4.sort(function(a, b) { return (b.bitrate || 0) - (a.bitrate || 0); });
+          audioByContainer.webm.sort(function(a, b) { return (b.bitrate || 0) - (a.bitrate || 0); });
+          allAudio.sort(function(a, b) { return (b.bitrate || 0) - (a.bitrate || 0); });
+          videoArr.sort(function(a, b) {
+            if ((b.height || 0) !== (a.height || 0)) return (b.height || 0) - (a.height || 0);
+            return (b.bitrate || 0) - (a.bitrate || 0);
+          });
+          for (var av = 0; av < videoArr.length; av++) {
+            var v = videoArr[av];
+            var vKey = v.url || '';
+            if (!vKey || seenAdaptive[vKey]) continue;
+            seenAdaptive[vKey] = true;
+            var container = getContainerFromMime(v.mimeType) || 'mp4';
+            var matchedAudio = (audioByContainer[container] && audioByContainer[container][0]) || allAudio[0] || null;
             streams.push({
-              url: videoArr[0].url, audioUrl: audioArr[0].url,
-              type: 'MP4', format: 'mp4',
-              quality: videoArr[0].qualityLabel || (videoArr[0].height + 'p')
+              url: v.url,
+              audioUrl: matchedAudio ? matchedAudio.url : null,
+              type: container.toUpperCase(),
+              format: container,
+              quality: safeQualityLabel(v),
+              fps: v.fps || null,
+              source: 'youtube-player-adaptive'
             });
           }
         }
-        // 4) Progressive formats (combined video+audio, up to 720p)
-        if (streams.length === 0 && sd.formats && sd.formats.length > 0) {
-          var vf = [];
-          for (var j = 0; j < sd.formats.length; j++) {
-            var g = sd.formats[j];
-            if (!g.mimeType) continue;
-            if (!g.url) { hasSignatureCipher = true; continue; }
-            if (g.mimeType.indexOf('video/') === 0) vf.push(g);
-          }
-          vf.sort(function(a,b) { return (b.height||0) - (a.height||0); });
-          if (vf.length > 0) {
+
+        var resolvedFormats = [];
+        for (var j = 0; j < (sd.formats || []).length; j++) {
+          var pf = sd.formats[j];
+          if (!pf || !pf.url || !pf.mimeType) continue;
+          if (pf.mimeType.indexOf('video/') !== 0) continue;
+          var pContainer = getContainerFromMime(pf.mimeType);
+          if (pContainer !== 'mp4' && pContainer !== 'webm') continue;
+          resolvedFormats.push(pf);
+        }
+
+        if (resolvedFormats.length > 0) {
+          var seenProg = {};
+          resolvedFormats.sort(function(a, b) {
+            if ((b.height || 0) !== (a.height || 0)) return (b.height || 0) - (a.height || 0);
+            return (b.bitrate || 0) - (a.bitrate || 0);
+          });
+          for (var pv = 0; pv < resolvedFormats.length; pv++) {
+            var p = resolvedFormats[pv];
+            var pKey = p.url || '';
+            if (!pKey || seenProg[pKey]) continue;
+            seenProg[pKey] = true;
+            var progContainer = getContainerFromMime(p.mimeType) || 'mp4';
             streams.push({
-              url: vf[0].url, type: 'MP4', format: 'mp4',
-              quality: vf[0].qualityLabel || (vf[0].height ? vf[0].height + 'p' : 'Best')
+              url: p.url,
+              type: progContainer.toUpperCase(),
+              format: progContainer,
+              quality: safeQualityLabel(p),
+              fps: p.fps || null,
+              source: 'youtube-player-progressive'
             });
           }
         }
 
         return {
           streams: streams,
-          debug: { found: true, source: source, hasSignatureCipher: hasSignatureCipher,
-                   adaptiveCount: sd.adaptiveFormats ? sd.adaptiveFormats.length : 0,
-                   formatCount: sd.formats ? sd.formats.length : 0 }
+          debug: {
+            found: true,
+            source: source,
+            method: 'player-response',
+            adaptiveCount: sd.adaptiveFormats ? sd.adaptiveFormats.length : 0,
+            formatCount: sd.formats ? sd.formats.length : 0
+          }
         };
       } catch(e) {
         return { streams: [], debug: { error: e.message } };
@@ -204,16 +268,16 @@ function extractYouTubeFromMainWorld(tabId, callback) {
     }
   }, function(results) {
     if (chrome.runtime.lastError) {
-      console.log('[YouTube MAIN] Error:', chrome.runtime.lastError.message);
+      logDebug('[YouTube MAIN] Error:', chrome.runtime.lastError.message);
       callback([]);
       return;
     }
     if (results && results[0] && results[0].result) {
       var data = results[0].result;
-      console.log('[YouTube MAIN]', JSON.stringify(data.debug), 'Streams:', data.streams.length);
+      logDebug('[YouTube MAIN]', JSON.stringify(data.debug), 'Streams:', data.streams.length);
       callback(data.streams || []);
     } else {
-      console.log('[YouTube MAIN] No result returned');
+      logDebug('[YouTube MAIN] No result returned');
       callback([]);
     }
   });
@@ -227,19 +291,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (streamData[tabId]) {
       delete streamData[tabId];
     }
-  }
-
-  if (changeInfo.status === 'complete' && tab.url && !tab.url.startsWith('chrome://')) {
-    // Auto-scan content after 2 seconds (let page load)
-    setTimeout(() => {
-      chrome.tabs.sendMessage(tabId, {action: 'autoScan'}, (response) => {
-        if (chrome.runtime.lastError) return;
-        if (response && (response.hasVideo || response.hasIframe)) {
-          console.log('[Auto-Scan] Videos detected on tab', tabId);
-          updateBadge(tabId);
-        }
-      });
-    }, 2000);
   }
 });
 
@@ -334,6 +385,64 @@ function isBlockedUrl(url) {
   return BLOCKED_URL_PATTERNS.some(pattern => pattern.test(url));
 }
 
+function inferHlsQualityFromUrl(url) {
+  try {
+    const clean = String(url || '').split('?')[0].toLowerCase();
+    const pMatch = clean.match(/(?:^|[\/_.-])(\d{3,4})p(?:[\/_.-]|$)/i);
+    if (pMatch) return pMatch[1] + 'p';
+    const whMatch = clean.match(/(\d{3,4})x(\d{3,4})/i);
+    if (whMatch) return whMatch[2] + 'p';
+    const hMatch = clean.match(/(?:^|[\/_.-])h(\d{3,4})(?:[\/_.-]|$)/i);
+    if (hMatch) return hMatch[1] + 'p';
+  } catch (e) {}
+  return '';
+}
+
+function addDetectedStream(tabId, stream) {
+  if (!streamData[tabId]) {
+    streamData[tabId] = { streams: [], segments: [], videos: [], subtitles: [], pageUrl: '' };
+  }
+  const existing = streamData[tabId].streams.find(s => s.url === stream.url);
+  if (existing) return false;
+  streamData[tabId].streams.push(stream);
+  updateBadge(tabId);
+  return true;
+}
+
+// Capture HLS by response content-type (some manifests do not expose .m3u8 in URL)
+chrome.webRequest.onCompleted.addListener(
+  (details) => {
+    const tabId = details.tabId;
+    if (tabId < 0) return;
+    if (!details.responseHeaders || !Array.isArray(details.responseHeaders)) return;
+    if (details.statusCode && (details.statusCode < 200 || details.statusCode >= 300)) return;
+
+    const contentTypeHeader = details.responseHeaders.find(h => String(h.name || '').toLowerCase() === 'content-type');
+    const contentType = String((contentTypeHeader && contentTypeHeader.value) || '').toLowerCase();
+    const isHlsContentType = contentType.includes('application/vnd.apple.mpegurl') || contentType.includes('application/x-mpegurl');
+    if (!isHlsContentType) return;
+
+    const url = details.url;
+    if (!url || isBlockedUrl(url)) return;
+    const timestamp = new Date().toLocaleTimeString();
+    const inferred = inferHlsQualityFromUrl(url);
+    const isMaster = /master/i.test(url);
+
+    const added = addDetectedStream(tabId, {
+      url: url,
+      type: 'HLS',
+      format: 'm3u8',
+      time: timestamp,
+      quality: isMaster ? 'Master' : (inferred || 'Playlist')
+    });
+    if (added) {
+      logDebug('[HLS Content-Type Detected]', url.substring(0, 80));
+    }
+  },
+  { urls: ['<all_urls>'], types: ['xmlhttprequest', 'media', 'other'] },
+  ['responseHeaders']
+);
+
 // Capture all media requests (streams in background)
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
@@ -392,17 +501,17 @@ chrome.webRequest.onBeforeRequest.addListener(
       const timestamp = new Date().toLocaleTimeString();
       
       if (isM3U8) {
-        const existing = streamData[tabId].streams.find(s => s.url === url);
-        if (!existing) {
-          streamData[tabId].streams.push({
-            url: url,
-            type: 'HLS',
-            format: 'm3u8',
-            time: timestamp,
-            quality: url.includes('master') ? 'Master' : 'Playlist'
-          });
-          console.log('[HLS Auto-Detected]', url.substring(0, 80));
-          updateBadge(tabId);
+        const inferred = inferHlsQualityFromUrl(url);
+        const isMaster = url.includes('master');
+        const added = addDetectedStream(tabId, {
+          url: url,
+          type: 'HLS',
+          format: 'm3u8',
+          time: timestamp,
+          quality: isMaster ? 'Master' : (inferred || 'Playlist')
+        });
+        if (added) {
+          logDebug('[HLS Auto-Detected]', url.substring(0, 80));
         }
       } else if (isMPD) {
         const existing = streamData[tabId].streams.find(s => s.url === url);
@@ -414,7 +523,7 @@ chrome.webRequest.onBeforeRequest.addListener(
             time: timestamp,
             quality: 'Manifest'
           });
-          console.log('[DASH Auto-Detected]', url.substring(0, 80));
+          logDebug('[DASH Auto-Detected]', url.substring(0, 80));
           updateBadge(tabId);
         }
       } else if (isTS || isM4S) {
@@ -479,7 +588,7 @@ chrome.webRequest.onBeforeRequest.addListener(
             format: format,
             time: timestamp
           });
-          console.log('[Subtitle Auto-Detected]', format.toUpperCase(), lang || 'unknown lang', url.substring(0, 80));
+          logDebug('[Subtitle Auto-Detected]', format.toUpperCase(), lang || 'unknown lang', url.substring(0, 80));
         }
       } else if (isMP4 || isVideoType) {
         const existing = streamData[tabId].videos.find(v => v.url === url);
@@ -496,7 +605,7 @@ chrome.webRequest.onBeforeRequest.addListener(
             format: format,
             time: timestamp
           });
-          console.log('[Video Auto-Detected]', format.toUpperCase(), url.substring(0, 80));
+          logDebug('[Video Auto-Detected]', format.toUpperCase(), url.substring(0, 80));
           updateBadge(tabId);
         }
       }
@@ -529,7 +638,7 @@ chrome.webRequest.onSendHeaders.addListener(
       }
       // Store by URL so we can look them up later
       capturedHeaders[url] = headers;
-      console.log('[Headers Captured]', url.substring(0, 60), 'Referer:', headers.referer || 'none');
+      logDebug('[Headers Captured]', url.substring(0, 60), 'Referer:', headers.referer || 'none');
       
       // Also store on the stream object if it exists
       const data = streamData[details.tabId];
@@ -649,6 +758,292 @@ function formatBytes(bytes) {
   return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
 }
 
+function parseHeightFromQualityLabel(label) {
+  const m = String(label || '').match(/(\d{3,4})p/i);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+function scoreQualitiesResponse(data) {
+  const qualities = Array.isArray(data && data.qualities) ? data.qualities : [];
+  const audioTracks = Array.isArray(data && data.audioTracks) ? data.audioTracks : [];
+  const valid = qualities.filter(q => q && q.url);
+  const maxHeight = valid.reduce((max, q) => {
+    const fromRes = (() => {
+      const parts = String(q.resolution || '').split('x');
+      const h = parseInt(parts[1] || '0', 10);
+      return Number.isFinite(h) ? h : 0;
+    })();
+    const fromLabel = parseHeightFromQualityLabel(q.label);
+    return Math.max(max, fromRes, fromLabel);
+  }, 0);
+  const nonDefaultCount = valid.filter(q => {
+    const l = String(q.label || '').toLowerCase();
+    return !l.includes('default') && !l.includes('unknown');
+  }).length;
+  const hasMultipleUsefulQualities = nonDefaultCount > 1;
+  return (
+    (hasMultipleUsefulQualities ? 100000 : 0) +
+    (maxHeight * 100) +
+    (valid.length * 10) +
+    audioTracks.length
+  );
+}
+
+async function requestQualities(url, headers) {
+  const resp = await fetch(`${SERVER_URL}/qualities`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: url,
+      referer: headers.referer || '',
+      origin: headers.origin || '',
+      cookie: headers.cookie || '',
+      userAgent: headers.userAgent || ''
+    })
+  });
+  return await resp.json();
+}
+
+function parseM3u8Attributes(raw) {
+  const out = {};
+  const re = /([A-Z0-9-]+)=("[^"]*"|[^,]*)/gi;
+  let m;
+  while ((m = re.exec(raw || '')) !== null) {
+    const key = m[1];
+    const value = m[2];
+    out[key] = value && value.startsWith('"') && value.endsWith('"')
+      ? value.slice(1, -1)
+      : value;
+  }
+  return out;
+}
+
+function appendQueryParamsCompat(sourceUrl, targetUrl) {
+  try {
+    const source = new URL(sourceUrl, targetUrl);
+    const target = new URL(targetUrl, source);
+    if (!source.search || source.search === '?') return target.href;
+    const sourceParams = new URLSearchParams(source.search);
+    const targetParams = new URLSearchParams(target.search);
+    let changed = false;
+    sourceParams.forEach((value, key) => {
+      if (!targetParams.has(key)) {
+        targetParams.append(key, value);
+        changed = true;
+      }
+    });
+    if (!changed) return target.href;
+    target.search = targetParams.toString();
+    return target.href;
+  } catch (e) {
+    return targetUrl;
+  }
+}
+
+function parseMasterM3u8Browser(text, baseUrl) {
+  const lines = String(text || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const variants = [];
+  const audioGroups = {};
+  const subtitleGroups = {};
+
+  function resolveUrl(targetUrl) {
+    try {
+      const abs = String(targetUrl || '').startsWith('http')
+        ? String(targetUrl)
+        : new URL(String(targetUrl || ''), baseUrl).href;
+      return appendQueryParamsCompat(baseUrl, abs);
+    } catch (e) {
+      return String(targetUrl || '');
+    }
+  }
+
+  for (const line of lines) {
+    if (!line.startsWith('#EXT-X-MEDIA:')) continue;
+    const attrs = parseM3u8Attributes(line.replace(/^#EXT-X-MEDIA:/i, ''));
+    const type = String(attrs.TYPE || '').toUpperCase();
+    const groupId = attrs['GROUP-ID'];
+    const uri = attrs.URI;
+    if (!type || !groupId || !uri) continue;
+    const track = {
+      url: resolveUrl(uri),
+      language: attrs.LANGUAGE || 'und',
+      name: attrs.NAME || attrs.LANGUAGE || 'Default',
+      isDefault: String(attrs.DEFAULT || '').toUpperCase() === 'YES'
+    };
+    if (type === 'AUDIO') {
+      if (!audioGroups[groupId]) audioGroups[groupId] = [];
+      audioGroups[groupId].push(track);
+    } else if (type === 'SUBTITLES') {
+      if (!subtitleGroups[groupId]) subtitleGroups[groupId] = [];
+      subtitleGroups[groupId].push(track);
+    }
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith('#EXT-X-STREAM-INF:')) continue;
+    const attrs = parseM3u8Attributes(lines[i].replace(/^#EXT-X-STREAM-INF:/i, ''));
+    const bw = parseInt(attrs.BANDWIDTH || '0', 10) || 0;
+    const res = attrs.RESOLUTION || 'unknown';
+    const audioGroupId = attrs.AUDIO || null;
+    for (let j = i + 1; j < lines.length; j++) {
+      const candidate = lines[j];
+      if (!candidate || candidate.startsWith('#')) continue;
+      const variantUrl = resolveUrl(candidate);
+      const tracks = audioGroupId && audioGroups[audioGroupId] ? audioGroups[audioGroupId] : [];
+      const defaultTrack = tracks.find((t) => t.isDefault) || tracks[0] || null;
+      variants.push({
+        bandwidth: bw,
+        resolution: res,
+        url: variantUrl,
+        audioUrl: defaultTrack ? defaultTrack.url : null,
+        audioGroupId: audioGroupId
+      });
+      break;
+    }
+  }
+
+  variants.sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
+
+  const qualities = variants.map((v) => {
+    const h = Number(String(v.resolution || '').split('x')[1] || 0);
+    let label = 'unknown';
+    if (h >= 2160) label = '2160p';
+    else if (h >= 1440) label = '1440p';
+    else if (h >= 1080) label = '1080p';
+    else if (h >= 720) label = '720p';
+    else if (h >= 480) label = '480p';
+    else if (h >= 360) label = '360p';
+    else if (h >= 240) label = '240p';
+    label = `${label} (${Math.round((v.bandwidth || 0) / 1000)} kbps)`;
+    return {
+      label,
+      url: v.url,
+      bandwidth: v.bandwidth || 0,
+      resolution: v.resolution || 'unknown',
+      audioUrl: v.audioUrl || null,
+      audioGroupId: v.audioGroupId || null
+    };
+  });
+
+  const audioTracks = [];
+  const seenAudio = new Set();
+  Object.keys(audioGroups).forEach((gid) => {
+    audioGroups[gid].forEach((t) => {
+      const key = `${gid}|${t.language}|${t.name}`;
+      if (seenAudio.has(key)) return;
+      seenAudio.add(key);
+      audioTracks.push({
+        url: t.url,
+        language: t.language,
+        name: t.name,
+        isDefault: t.isDefault,
+        groupId: gid
+      });
+    });
+  });
+
+  const audioGroupMap = {};
+  Object.keys(audioGroups).forEach((gid) => {
+    audioGroupMap[gid] = {};
+    audioGroups[gid].forEach((t) => {
+      audioGroupMap[gid][t.language || t.name] = t.url;
+    });
+  });
+
+  const subtitleTracks = [];
+  const seenSub = new Set();
+  Object.keys(subtitleGroups).forEach((gid) => {
+    subtitleGroups[gid].forEach((t) => {
+      const key = `${gid}|${t.language}|${t.name}`;
+      if (seenSub.has(key)) return;
+      seenSub.add(key);
+      subtitleTracks.push({
+        url: t.url,
+        language: t.language,
+        name: t.name,
+        isDefault: t.isDefault,
+        groupId: gid
+      });
+    });
+  });
+
+  return { qualities, audioTracks, audioGroupMap, subtitleTracks };
+}
+
+async function fetchTextBrowser(url) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const resp = await fetch(url, {
+      method: 'GET',
+      credentials: 'include',
+      redirect: 'follow',
+      signal: ctrl.signal
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.text();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function requestQualitiesBrowser(url) {
+  const text = await fetchTextBrowser(url);
+  if (text.includes('#EXT-X-STREAM-INF:')) {
+    return parseMasterM3u8Browser(text, url);
+  }
+  return {
+    qualities: [{ label: 'Default', url: url, bandwidth: 0, resolution: 'unknown' }],
+    audioTracks: [],
+    audioGroupMap: null,
+    subtitleTracks: []
+  };
+}
+
+function normalizeCapturedHeaderBundle(raw) {
+  const src = raw || {};
+  return {
+    referer: src.referer || '',
+    origin: src.origin || '',
+    cookie: src.cookie || '',
+    userAgent: src['user-agent'] || src.userAgent || ''
+  };
+}
+
+function recoverManifestUrlsFromPerformance(tabId, callback) {
+  chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    world: 'MAIN',
+    func: function() {
+      try {
+        const found = new Set();
+        const entries = performance.getEntriesByType('resource') || [];
+        entries.forEach((entry) => {
+          const u = String((entry && entry.name) || '');
+          if (!u) return;
+          const l = u.toLowerCase();
+          if (l.includes('.m3u8') || l.includes('.mpd')) {
+            found.add(u);
+          }
+        });
+        return Array.from(found);
+      } catch (e) {
+        return [];
+      }
+    }
+  }, (results) => {
+    if (chrome.runtime.lastError) {
+      callback([]);
+      return;
+    }
+    const urls = (results && results[0] && Array.isArray(results[0].result)) ? results[0].result : [];
+    callback(urls);
+  });
+}
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'downloadProgress') {
     const portId = Date.now();
@@ -675,120 +1070,76 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     
     chrome.tabs.get(tabId, (tab) => {
       const pageTitle = tab.title || 'Unknown';
-      
-      // Try to get page thumbnail and duration from the content script
-      chrome.tabs.sendMessage(tabId, {action: 'getVideos'}, (contentResp) => {
-        if (chrome.runtime.lastError) { /* tab may have navigated away */ }
-        const pageThumbnail = (contentResp && contentResp.pageThumbnail) || null;
-        const pageDuration = (contentResp && contentResp.pageDuration) || null;
-
-        // Merge YouTube streams found by content script (ytInitialPlayerResponse parsing)
-        const ytStreams = (contentResp && contentResp.youtubeStreams) || [];
-        ytStreams.forEach(ys => {
-          const alreadyCaptured = uniqueStreams.some(s => s.url === ys.url);
-          if (!alreadyCaptured) {
-            uniqueStreams.push({
-              url: ys.url,
-              type: ys.type,
-              format: ys.format,
-              quality: ys.quality,
-              audioUrl: ys.audioUrl || null,
-              time: new Date().toLocaleTimeString()
-            });
-          }
-        });
-
-        // Merge streams discovered from Performance API (fallback when SW restarted
-        // and lost in-memory streamData)
-        const perfStreams = (contentResp && contentResp.discoveredStreams) || [];
-        perfStreams.forEach(ps => {
-          const alreadyCaptured = uniqueStreams.some(s => s.url === ps.url);
-          if (!alreadyCaptured) {
-            uniqueStreams.push({
-              url: ps.url,
-              type: ps.type,
-              format: ps.format,
-              quality: ps.quality,
-              time: new Date().toLocaleTimeString(),
-              source: 'performance'
-            });
-            // Also persist into streamData so badge/dedup work correctly
-            if (!streamData[tabId]) {
-              streamData[tabId] = { streams: [], segments: [], videos: [], subtitles: [], pageUrl: tab.url || '' };
-            }
-            streamData[tabId].streams.push({
-              url: ps.url,
-              type: ps.type,
-              format: ps.format,
-              quality: ps.quality,
-              time: new Date().toLocaleTimeString()
-            });
-          }
-        });
-        if (perfStreams.length > 0) {
-          console.log('[getStreams] Recovered', perfStreams.length, 'stream(s) from Performance API fallback');
+      const allSubtitles = [...uniqueSubtitles];
+      const ensureTabData = () => {
+        if (!streamData[tabId]) {
+          streamData[tabId] = { streams: [], segments: [], videos: [], subtitles: [], pageUrl: (tab && tab.url) || '' };
         }
+      };
 
-        // Merge subtitle sources: network-captured + content script DOM-found
-        const domSubtitles = (contentResp && contentResp.subtitleTracks) || [];
-        const allSubtitles = [...uniqueSubtitles];
-        // Add DOM-found subtitles that aren't already captured from network
-        domSubtitles.forEach(ds => {
-          const dsBase = ds.url.split('?')[0].split('#')[0].replace(/^https?:\/\//, '');
-          const alreadyCaptured = allSubtitles.some(ns => {
-            const nsBase = ns.url.split('?')[0].split('#')[0].replace(/^https?:\/\//, '');
-            return nsBase === dsBase;
-          });
-          if (!alreadyCaptured) {
-            allSubtitles.push({
-              url: ds.url,
-              language: ds.language || '',
-              name: ds.name || ds.language || 'Subtitles',
-              format: ds.format || 'vtt',
-              time: new Date().toLocaleTimeString(),
-              source: 'dom'
-            });
+      function finishGetStreams() {
+        sendResponse({
+          streams: uniqueStreams.map(s => ({
+            ...s, pageTitle,
+            headers: s.headers || capturedHeaders[s.url] || null
+          })),
+          videos: uniqueVideos.map(v => ({...v, pageTitle })),
+          segmentCount: data.segments.length,
+          serverAvailable: serverAvailable,
+          capturedSubtitles: allSubtitles,
+          pageTitle: pageTitle,
+          debug: {
+            totalCaptures: uniqueStreams.length + uniqueVideos.length,
+            hasSegments: data.segments.length > 0,
+            subtitleSources: { network: uniqueSubtitles.length }
           }
         });
+      }
 
-        // Helper: build and send the final response
-        function finishGetStreams() {
-          sendResponse({
-            streams: uniqueStreams.map(s => ({
-              ...s, pageTitle,
-              thumbnail: pageThumbnail,
-              duration: pageDuration ? pageDuration.formatted : null,
-              durationSeconds: pageDuration ? pageDuration.seconds : null,
-              headers: s.headers || capturedHeaders[s.url] || null
-            })),
-            videos: uniqueVideos.map(v => ({...v, pageTitle, thumbnail: pageThumbnail, duration: pageDuration ? pageDuration.formatted : null, durationSeconds: pageDuration ? pageDuration.seconds : null})),
-            segmentCount: data.segments.length,
-            serverAvailable: serverAvailable,
-            capturedSubtitles: allSubtitles,
-            pageTitle: pageTitle,
-            pageThumbnail: pageThumbnail,
-            pageDuration: pageDuration,
-            debug: {
-              totalCaptures: uniqueStreams.length + uniqueVideos.length,
-              hasSegments: data.segments.length > 0,
-              subtitleSources: { network: uniqueSubtitles.length, dom: domSubtitles.length }
-            }
+      recoverManifestUrlsFromPerformance(tabId, (perfUrls) => {
+        if (perfUrls && perfUrls.length > 0) {
+          ensureTabData();
+          perfUrls.forEach((u) => {
+            const lower = String(u || '').toLowerCase();
+            const isMpd = lower.includes('.mpd');
+            const inferred = inferHlsQualityFromUrl(u);
+            const stream = {
+              url: u,
+              type: isMpd ? 'DASH' : 'HLS',
+              format: isMpd ? 'mpd' : 'm3u8',
+              quality: isMpd ? 'Manifest' : (/master/i.test(lower) ? 'Master' : (inferred || 'Playlist')),
+              source: 'performance',
+              time: new Date().toLocaleTimeString()
+            };
+            const existing = uniqueStreams.find(s => s.url === u);
+            if (!existing) uniqueStreams.push(stream);
+            addDetectedStream(tabId, stream);
           });
         }
 
-        // If on YouTube and no streams found yet, try MAIN world extraction
-        // (handles SPA navigation where script tags don't have the current video's data)
-        const isYouTubePage = tab.url && tab.url.includes('youtube.com/watch');
-        if (isYouTubePage && uniqueStreams.length === 0) {
+        // YouTube-specific extraction is kept because YouTube hides many direct requests.
+        // Include Shorts URLs as well (e.g. /shorts/{id}).
+        const tabUrl = String((tab && tab.url) || '');
+        const isYouTubePage = /(^https?:\/\/)?(www\.|m\.)?(youtube\.com\/(watch|shorts|live)\b|youtu\.be\/)/i.test(tabUrl);
+        if (isYouTubePage) {
           extractYouTubeFromMainWorld(tabId, (mainStreams) => {
             mainStreams.forEach(ms => {
-              if (!uniqueStreams.some(s => s.url === ms.url)) {
+              const existing = uniqueStreams.find(s => s.url === ms.url);
+              if (existing) {
+                // Enrich already-captured rows so popup can treat them as YouTube variants.
+                if (!existing.source && ms.source) existing.source = ms.source;
+                if (!existing.fps && ms.fps) existing.fps = ms.fps;
+                if (!existing.audioUrl && ms.audioUrl) existing.audioUrl = ms.audioUrl;
+                if ((!existing.quality || existing.quality === 'Best') && ms.quality) existing.quality = ms.quality;
+              } else {
                 uniqueStreams.push({
                   url: ms.url,
                   type: ms.type,
                   format: ms.format,
                   quality: ms.quality,
                   audioUrl: ms.audioUrl || null,
+                  fps: ms.fps || null,
+                  source: ms.source || null,
                   time: new Date().toLocaleTimeString()
                 });
               }
@@ -840,7 +1191,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
 
   } else if (request.action === 'addToHistory') {
-    // Add a completed download to history (called from popup as fallback)
+    // Add a completed download to history (called from popup)
     recordHistory(request.filename, request.size, request.source);
     sendResponse({ success: true });
     return true;
@@ -850,27 +1201,105 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const realHeaders = request.headers || capturedHeaders[request.url] || null;
     
     chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-      const pageUrl = tabs[0] ? tabs[0].url : '';
-      const storedPageUrl = streamData[tabs[0]?.id]?.pageUrl || '';
+      const activeTab = tabs[0] || null;
+      const pageUrl = activeTab ? activeTab.url : '';
+      const tabId = activeTab ? activeTab.id : -1;
+      const storedPageUrl = streamData[tabId]?.pageUrl || '';
       const bestReferer = (realHeaders && realHeaders.referer) || pageUrl || storedPageUrl;
       const bestOrigin = (realHeaders && realHeaders.origin) || (pageUrl ? new URL(pageUrl).origin : '');
       const bestCookie = (realHeaders && realHeaders.cookie) || '';
       const bestUA = (realHeaders && realHeaders['user-agent']) || '';
-      
-      fetch(`${SERVER_URL}/qualities`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: request.url,
-          referer: bestReferer,
-          origin: bestOrigin,
-          cookie: bestCookie,
-          userAgent: bestUA
+
+      const requestHeaders = {
+        referer: bestReferer,
+        origin: bestOrigin,
+        cookie: bestCookie,
+        userAgent: bestUA
+      };
+
+      const tabStreams = (streamData[tabId] && Array.isArray(streamData[tabId].streams))
+        ? streamData[tabId].streams
+        : [];
+      const hlsCandidates = tabStreams
+        .filter(s => s && s.type === 'HLS' && s.url)
+        .sort((a, b) => {
+          const aMaster = /master/i.test(String(a.quality || '')) || /master/i.test(String(a.url || ''));
+          const bMaster = /master/i.test(String(b.quality || '')) || /master/i.test(String(b.url || ''));
+          if (aMaster !== bMaster) return aMaster ? -1 : 1;
+          return parseHeightFromQualityLabel(String(b.quality || '')) - parseHeightFromQualityLabel(String(a.quality || ''));
         })
-      })
-      .then(r => r.json())
-      .then(data => sendResponse({ success: true, qualities: data.qualities || [], audioTracks: data.audioTracks || [], audioGroupMap: data.audioGroupMap || null, subtitleTracks: data.subtitleTracks || [] }))
-      .catch(err => sendResponse({ success: false, error: err.message }));
+        .map(s => s.url);
+
+      const candidates = [];
+      const seen = new Set();
+      [request.url, ...hlsCandidates].forEach((u) => {
+        const key = String(u || '').trim();
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        candidates.push(key);
+      });
+
+      (async () => {
+        let bestData = null;
+        let bestUrl = request.url;
+        let bestScore = -1;
+        const maxToProbe = Math.min(candidates.length, 12);
+
+        for (let i = 0; i < maxToProbe; i++) {
+          const candidateUrl = candidates[i];
+          try {
+            let bestCandidateData = null;
+            let bestCandidateScore = -1;
+
+            // Puemos-style first pass: resolve in browser context (local extension fetch).
+            try {
+              const browserData = await requestQualitiesBrowser(candidateUrl);
+              const browserScore = scoreQualitiesResponse(browserData);
+              if (browserScore > bestCandidateScore) {
+                bestCandidateScore = browserScore;
+                bestCandidateData = browserData;
+              }
+            } catch (e) {}
+
+            // Backend pass (ffmpeg-side) with candidate-specific captured headers.
+            try {
+              const perCandidateHeaders = normalizeCapturedHeaderBundle(capturedHeaders[candidateUrl]);
+              const effectiveHeaders = {
+                referer: perCandidateHeaders.referer || requestHeaders.referer,
+                origin: perCandidateHeaders.origin || requestHeaders.origin,
+                cookie: perCandidateHeaders.cookie || requestHeaders.cookie,
+                userAgent: perCandidateHeaders.userAgent || requestHeaders.userAgent
+              };
+              const serverData = await requestQualities(candidateUrl, effectiveHeaders);
+              const serverScore = scoreQualitiesResponse(serverData);
+              if (serverScore > bestCandidateScore) {
+                bestCandidateScore = serverScore;
+                bestCandidateData = serverData;
+              }
+            } catch (e) {}
+
+            if (bestCandidateData && bestCandidateScore > bestScore) {
+              bestScore = bestCandidateScore;
+              bestData = bestCandidateData;
+              bestUrl = candidateUrl;
+            }
+          } catch (e) {}
+        }
+
+        if (!bestData) {
+          sendResponse({ success: false, error: 'Failed to fetch qualities' });
+          return;
+        }
+
+        sendResponse({
+          success: true,
+          qualities: bestData.qualities || [],
+          audioTracks: bestData.audioTracks || [],
+          audioGroupMap: bestData.audioGroupMap || null,
+          subtitleTracks: bestData.subtitleTracks || [],
+          selectedUrl: bestUrl
+        });
+      })().catch((err) => sendResponse({ success: false, error: err.message }));
     });
     return true;
     
@@ -899,7 +1328,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       const bestCookie = (realHeaders && realHeaders.cookie) || '';
       const bestUA = (realHeaders && realHeaders['user-agent']) || '';
       
-      console.log('[Download] Using Referer:', bestReferer.substring(0, 80));
+      logDebug('[Download] Using Referer:', bestReferer.substring(0, 80));
       
       fetch(`${SERVER_URL}/download`, {
         method: 'POST',
@@ -914,12 +1343,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           userAgent: bestUA,
           audioUrl: request.audioUrl || null,
           subtitleUrl: request.subtitleUrl || null,
-          outputFormat: request.outputFormat || 'mp4'
+          outputFormat: request.outputFormat || 'mp4',
+          dashVideoIndex: (typeof request.dashVideoIndex === 'number' ? request.dashVideoIndex : null),
+          dashAudioIndex: (typeof request.dashAudioIndex === 'number' ? request.dashAudioIndex : null)
         })
       })
     .then(response => response.json())
     .then(data => {
-      console.log('[Server Download]', data);
+      logDebug('[Server Download]', data);
       // Persist active download so popup can restore state after reopen
       if (data.downloadId) {
         chrome.storage.session.get('activeStreamDownloads', (result) => {
@@ -945,7 +1376,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
     
   } else if (request.action === 'download') {
-    console.log('[Download Request]', request.filename);
+    logDebug('[Download Request]', request.filename);
     
     chrome.downloads.download({
       url: request.url,
@@ -959,7 +1390,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           error: chrome.runtime.lastError.message 
         });
       } else {
-        console.log('[Download Started] ID:', downloadId);
+        logDebug('[Download Started] ID:', downloadId);
         activeDownloads.set(downloadId, { 
           bytes: 0, 
           time: Date.now(),
